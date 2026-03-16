@@ -3,42 +3,56 @@ const app = express();
 const http = require('http').createServer(app);
 const io = require('socket.io')(http, { cors: { origin: "*" } });
 
-let players = {};
-let brokenPlanks = []; // Stores broken wood for late-joiners
+let lobbies = {}; // Tracks active matches
 
 io.on('connection', (socket) => {
-    console.log('Player connected: ' + socket.id);
-    
-    players[socket.id] = { x: 0, y: 1.8, z: 0, ry: 0, rx: 0, stance: 'stand' };
-    socket.emit('currentPlayers', players);
-    socket.emit('worldState', brokenPlanks); 
-    socket.broadcast.emit('newPlayer', { id: socket.id, player: players[socket.id] });
+    console.log('Player connected to Hub: ' + socket.id);
 
-    socket.on('playerMovement', (data) => {
-        players[socket.id] = data;
-        socket.broadcast.emit('playerMoved', { id: socket.id, ...data });
+    // 1. Send the list of servers to the Server Browser
+    socket.on('requestServers', () => {
+        const serverList = Object.keys(lobbies).map(id => ({
+            id: id,
+            name: lobbies[id].name,
+            players: lobbies[id].players.length
+        }));
+        socket.emit('serverList', serverList);
     });
 
-    socket.on('shoot', (data) => {
-        socket.broadcast.emit('enemyShoot', { id: socket.id, ...data });
+    // 2. Handle joining/creating a match
+    socket.on('joinMatch', (lobbyId) => {
+        // If they clicked Quick Match (null), find or make "Auto-Match #1"
+        if (!lobbyId || !lobbies[lobbyId]) {
+            lobbyId = 'lobby_1';
+            if (!lobbies[lobbyId]) lobbies[lobbyId] = { name: "Auto-Match #1", players: [] };
+        }
+        
+        socket.join(lobbyId);
+        lobbies[lobbyId].players.push(socket.id);
+        socket.currentLobby = lobbyId;
+
+        // Tell the client they successfully connected to the room!
+        socket.emit('matchJoined', lobbyId);
+        
+        // Update the server browser for anyone else looking at the menu
+        io.emit('serverList', Object.keys(lobbies).map(id => ({
+            id: id, name: lobbies[id].name, players: lobbies[id].players.length
+        })));
     });
 
-    socket.on('breakWood', (data) => {
-        brokenPlanks.push(data);
-        socket.broadcast.emit('woodBroken', data);
-    });
-
-    socket.on('deployDoor', (bIdx) => {
-        brokenPlanks = brokenPlanks.filter(p => p.bIdx !== bIdx);
-        socket.broadcast.emit('doorDeployed', bIdx);
-    });
-
+    // 3. Clean up empty servers when people leave
     socket.on('disconnect', () => {
-        delete players[socket.id];
-        io.emit('playerDisconnected', socket.id);
+        if (socket.currentLobby && lobbies[socket.currentLobby]) {
+            lobbies[socket.currentLobby].players = lobbies[socket.currentLobby].players.filter(id => id !== socket.id);
+            // Destroy lobby if empty so it disappears from the Server Browser
+            if (lobbies[socket.currentLobby].players.length === 0) {
+                delete lobbies[socket.currentLobby];
+            }
+            // Broadcast the new list
+            io.emit('serverList', Object.keys(lobbies).map(id => ({
+                id: id, name: lobbies[id].name, players: lobbies[id].players.length
+            })));
+        }
     });
 });
 
-http.listen(process.env.PORT || 3000, () => {
-    console.log('Action Server is LIVE.');
-});
+http.listen(process.env.PORT || 3000, () => { console.log('Matchmaking Server LIVE.'); });
